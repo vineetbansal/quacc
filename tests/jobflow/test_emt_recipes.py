@@ -56,7 +56,16 @@ def test_relaxed_slabs(tmp_path, monkeypatch):
 
     @flow
     def workflow(atoms):
-        relaxed_bulk = relax_job(atoms)
+        # The `bulk_to_slabs_flow` flow expects its first argument `atoms`
+        # to be an actual `Atoms` object (which it can pass safely to external
+        # functions) and not an `OutputReference`. We thus obtain the original
+        # callable for `relax_job` and use it to get results (`relaxed_bulk`),
+        # instead of the decorated `@job`.
+        relax_job_eager = (
+            relax_job.original if hasattr(relax_job, "original") else relax_job
+        )
+        relaxed_bulk = relax_job_eager(atoms)
+
         return bulk_to_slabs_flow(relaxed_bulk["atoms"], run_static=False)
 
     jobflow.run_locally(workflow(atoms), ensure_success=True)
