@@ -18,6 +18,37 @@ Flow = Callable[..., Any]
 Subflow = Callable[..., Any]
 
 
+def _make_context_capturing_wrapper(
+    original_func: Callable, wrapped_callable: Callable
+) -> Callable:
+    """
+    Create a wrapper that captures quacc context at call time and injects it
+    for restoration at execution time.
+
+    Parameters
+    ----------
+    original_func
+        The original function being decorated (used for @wraps).
+    wrapped_callable
+        The workflow-engine-wrapped callable to invoke.
+
+    Returns
+    -------
+    Callable
+        A wrapper that captures context before calling the wrapped callable.
+    """
+
+    @wraps(original_func)
+    def context_capturing_wrapper(*args, **kw):
+        ctx = get_context()
+        dir_ctx = get_directory_context()
+        kw["_quacc_ctx"] = ctx
+        kw["_quacc_dir"] = dir_ctx
+        return wrapped_callable(*args, **kw)
+
+    return context_capturing_wrapper
+
+
 def job(_func: Callable[..., Any] | None = None, **kwargs) -> Job:
     """
     Decorator for individual compute jobs. This is a `#!Python @job` decorator. Think of
@@ -148,18 +179,7 @@ def job(_func: Callable[..., Any] | None = None, **kwargs) -> Job:
             return _func(*f_args, **f_kwargs)
 
         dask_delayed = Delayed_(delayed(wrapper, **kwargs))
-
-        # Wrapper captures context at call time (during DAG construction)
-        # and injects it for restoration at execution time
-        @wraps(_func)
-        def context_capturing_wrapper(*args, **kw):
-            ctx = get_context()
-            dir_ctx = get_directory_context()
-            kw['_quacc_ctx'] = ctx
-            kw['_quacc_dir'] = dir_ctx
-            return dask_delayed(*args, **kw)
-
-        return context_capturing_wrapper
+        return _make_context_capturing_wrapper(_func, dask_delayed)
     elif settings.WORKFLOW_ENGINE == "jobflow":
         from jobflow import job as jf_job
 
@@ -169,35 +189,12 @@ def job(_func: Callable[..., Any] | None = None, **kwargs) -> Job:
 
         wrapped_fn = _get_parsl_wrapped_func(_func, kwargs)
         parsl_app = python_app(wrapped_fn, **kwargs)
-
-        # Wrapper captures context at call time (during DAG construction)
-        # and injects it for restoration at execution time
-        @wraps(_func)
-        def context_capturing_wrapper(*args, **kw):
-            ctx = get_context()
-            dir_ctx = get_directory_context()
-            kw['_quacc_ctx'] = ctx
-            kw['_quacc_dir'] = dir_ctx
-            return parsl_app(*args, **kw)
-
-        return context_capturing_wrapper
+        return _make_context_capturing_wrapper(_func, parsl_app)
     elif settings.WORKFLOW_ENGINE == "redun":
         from redun import task
 
-        # Create the actual Redun task
         redun_task = task(_func, namespace=_func.__module__, **kwargs)
-
-        # Wrapper captures context at call time (during DAG construction)
-        # and injects it for restoration at execution time
-        @wraps(_func)
-        def context_capturing_wrapper(*args, **kw):
-            ctx = get_context()
-            dir_ctx = get_directory_context()
-            kw['_quacc_ctx'] = ctx
-            kw['_quacc_dir'] = dir_ctx
-            return redun_task(*args, **kw)
-
-        return context_capturing_wrapper
+        return _make_context_capturing_wrapper(_func, redun_task)
     elif settings.WORKFLOW_ENGINE == "prefect":
         from prefect import task
 
@@ -350,20 +347,8 @@ def flow(_func: Callable[..., Any] | None = None, **kwargs) -> Flow:
     if settings.WORKFLOW_ENGINE == "redun":
         from redun import task
 
-        # Create the actual Redun task
         redun_task = task(_func, namespace=_func.__module__, **kwargs)
-
-        # Wrapper captures context at call time (during DAG construction)
-        # and injects it for restoration at execution time
-        @wraps(_func)
-        def context_capturing_wrapper(*args, **kw):
-            ctx = get_context()
-            dir_ctx = get_directory_context()
-            kw['_quacc_ctx'] = ctx
-            kw['_quacc_dir'] = dir_ctx
-            return redun_task(*args, **kw)
-
-        return context_capturing_wrapper
+        return _make_context_capturing_wrapper(_func, redun_task)
     elif settings.WORKFLOW_ENGINE == "prefect":
         return _get_prefect_wrapped_flow(_func, settings, **kwargs)
     else:
@@ -552,54 +537,20 @@ def subflow(_func: Callable[..., Any] | None = None, **kwargs) -> Subflow:
                 return client.gather(futures)
 
         dask_delayed = delayed(wrapper, **kwargs)
-
-        # Wrapper captures context at call time (during DAG construction)
-        # and injects it for restoration at execution time
-        @wraps(_func)
-        def context_capturing_wrapper(*args, **kw):
-            ctx = get_context()
-            dir_ctx = get_directory_context()
-            kw['_quacc_ctx'] = ctx
-            kw['_quacc_dir'] = dir_ctx
-            return dask_delayed(*args, **kw)
-
-        return context_capturing_wrapper
+        return _make_context_capturing_wrapper(_func, dask_delayed)
     elif settings.WORKFLOW_ENGINE == "parsl":
         from parsl import join_app
 
         wrapped_fn = _get_parsl_wrapped_func(_func, kwargs)
         parsl_app = join_app(wrapped_fn, **kwargs)
-
-        # Wrapper captures context at call time (during DAG construction)
-        # and injects it for restoration at execution time
-        @wraps(_func)
-        def context_capturing_wrapper(*args, **kw):
-            ctx = get_context()
-            dir_ctx = get_directory_context()
-            kw['_quacc_ctx'] = ctx
-            kw['_quacc_dir'] = dir_ctx
-            return parsl_app(*args, **kw)
-
-        return context_capturing_wrapper
+        return _make_context_capturing_wrapper(_func, parsl_app)
     elif settings.WORKFLOW_ENGINE == "prefect":
         return _get_prefect_wrapped_flow(_func, settings, **kwargs)
     elif settings.WORKFLOW_ENGINE == "redun":
         from redun import task
 
-        # Create the actual Redun task
         redun_task = task(_func, namespace=_func.__module__, **kwargs)
-
-        # Wrapper captures context at call time (during DAG construction)
-        # and injects it for restoration at execution time
-        @wraps(_func)
-        def context_capturing_wrapper(*args, **kw):
-            ctx = get_context()
-            dir_ctx = get_directory_context()
-            kw['_quacc_ctx'] = ctx
-            kw['_quacc_dir'] = dir_ctx
-            return redun_task(*args, **kw)
-
-        return context_capturing_wrapper
+        return _make_context_capturing_wrapper(_func, redun_task)
     else:
         return _func
 
