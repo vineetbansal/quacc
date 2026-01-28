@@ -9,9 +9,12 @@ from shutil import move, rmtree
 from typing import TYPE_CHECKING
 
 from monty.shutil import gzip_dir
+from filelock import FileLock
 
 from quacc import JobFailure, get_settings
 from quacc.utils.files import copy_decompress_files, make_unique_dir
+from quacc.wflow_tools.context import get_context_path, get_directory_context
+
 
 if TYPE_CHECKING:
     from ase.atoms import Atoms
@@ -20,6 +23,21 @@ if TYPE_CHECKING:
     from quacc.wflow_tools.job_argument import Copy
 
 LOGGER = getLogger(__name__)
+
+
+def create_next_available_dir(p: Path) -> Path:
+    parent = p.parent
+    stem = p.name
+
+    lock = FileLock("next_available_dir.lock", timeout=-1)
+    with lock:
+        n = 0
+        while True:
+            candidate = parent / f"{stem}-{n}"
+            if not candidate.exists():
+                candidate.mkdir(parents=True)
+                return candidate
+            n += 1
 
 
 def calc_setup(
@@ -63,9 +81,12 @@ def calc_setup(
         atoms.calc.directory = tmpdir
 
     # Define the results directory
-    job_results_dir = settings.RESULTS_DIR.resolve()
-    if settings.CREATE_UNIQUE_DIR:
-        job_results_dir /= f"{tmpdir.name.split('tmp-')[-1]}"
+    job_results_dir = settings.RESULTS_DIR / Path(get_directory_context())
+    job_results_dir = job_results_dir / get_context_path()
+    if job_results_dir == settings.RESULTS_DIR:
+        job_results_dir = settings.RESULTS_DIR / tmpdir.name.lstrip("tmp-")
+    else:
+        job_results_dir = create_next_available_dir(job_results_dir)
 
     # Create a symlink to the tmpdir
     if os.name != "nt" and settings.SCRATCH_DIR:
@@ -123,12 +144,11 @@ def calc_cleanup(
         gzip_dir(tmpdir)
 
     # Move files from tmpdir to job_results_dir
-    if settings.CREATE_UNIQUE_DIR:
-        move(tmpdir, job_results_dir)
-    else:
-        for file_name in os.listdir(tmpdir):
-            move(tmpdir / file_name, job_results_dir / file_name)
-        rmtree(tmpdir)
+    LOGGER.info(f"Moving {tmpdir} contents to {job_results_dir}")
+    job_results_dir.mkdir(parents=True, exist_ok=True)
+    for file_name in os.listdir(tmpdir):
+        move(tmpdir / file_name, job_results_dir / file_name)
+    rmtree(tmpdir)
     LOGGER.info(f"Calculation results stored at {job_results_dir}")
 
     # Remove symlink to tmpdir
