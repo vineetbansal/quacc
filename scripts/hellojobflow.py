@@ -5,12 +5,13 @@ from jobflow_remote import submit_flow
 from mypackage import hypot
 
 
-workflow = hypot(3, 4)
+if __name__ == "__main__":
+    workflow = hypot(3, 4)
 
-# Run locally
-# responses = jf.run_locally(workflow)
-# pprint(responses)
+    # Run locally
+    # responses = jf.run_locally(workflow)
+    # pprint(responses)
 
-# Run on slurm
-ids = submit_flow(workflow, worker="slurm")
-print(ids)
+    # Run on slurm
+    ids = submit_flow(workflow, worker="slurm")
+    print(ids)
