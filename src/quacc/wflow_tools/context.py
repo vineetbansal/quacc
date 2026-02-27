@@ -171,6 +171,55 @@ def _tracked_call(func, node_type, args, kwargs):
     # Create a unique name we can use at this level.
     name = make_unique_name(prefix=f"{func.__name__}-")
 
+    # Engines that serialize tasks (Redun, Jobflow, Parsl) pass context as
+    # special kwargs so it can cross process boundaries. Extract them here.
+    precaptured_ctx = kwargs.pop("_quacc_ctx", ())
+    precaptured_dir = kwargs.pop("_quacc_dir", "")
+
+    ctx_token = None
+    dir_token = None
+
+    try:
+        # If context was forwarded from the caller, restore it into the
+        # ContextVars so that nested calls see the correct stack.
+        if precaptured_ctx != ():
+            ctx_token = _execution_context.set(precaptured_ctx)
+        if precaptured_dir != "":
+            dir_token = _directory_context.set(precaptured_dir)
+
+        if ctx_token is None and dir_token is None and is_top_level():
+            # This is the outermost tracked call: create a unique root
+            # directory (e.g. ``<flow-name>-<timestamp>/``) and initialize both the
+            # directory context and the execution-context stack.
+            job_results_dir = settings.RESULTS_DIR.resolve()
+
+            with (
+                directory_context(str(job_results_dir)),
+                _push_context(name, node_type),
+            ):
+                return_value = func(*args, **kwargs)
+
+                # If everything went okay, clean up temporary directory
+                tmpdir_base = (settings.SCRATCH_DIR or settings.RESULTS_DIR).resolve()
+                tmpdir = tmpdir_base / Path("tmp-" + name)
+                if tmpdir.exists():
+                    shutil.rmtree(tmpdir)
+
+                return return_value
+        else:
+            # We are inside an already-tracked invocation; just push another
+            # node onto the existing stack.
+            with _push_context(name, node_type):
+                return func(*args, **kwargs)
+
+    finally:
+        # Reset any ContextVar tokens we explicitly set (for pre-captured
+        # context) so we don't leak state into sibling tasks.
+        if ctx_token is not None:
+            _execution_context.reset(ctx_token)
+        if dir_token is not None:
+            _directory_context.reset(dir_token)
+
     if is_top_level():
         # This is the outermost tracked call: create a unique root
         # directory (e.g. ``<flow-name>-<timestamp>/``) and initialize both the
