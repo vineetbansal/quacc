@@ -7,7 +7,12 @@ from functools import partial, wraps
 from typing import TYPE_CHECKING, Any
 
 from quacc.settings import change_settings_wrap
-from quacc.wflow_tools.context import NodeType, tracked
+from quacc.wflow_tools.context import (
+    NodeType,
+    get_context,
+    get_directory_context,
+    tracked,
+)
 
 if TYPE_CHECKING:
     from quacc.settings import QuaccSettings
@@ -147,7 +152,14 @@ def job(_func: Callable[..., Any] | None = None, **kwargs) -> Job:
         return Delayed_(delayed(wrapper, **kwargs))
 
     elif settings.WORKFLOW_ENGINE == "jobflow":
-        return _get_jobflow_wrapped_func(_func, **kwargs)
+        _func = tracked(NodeType.JOB)(_func)
+        # Jobflow inspects function signatures to resolve references; add
+        # explicit _quacc_ctx/_quacc_dir params so they survive inspection.
+        _func_for_jf = _add_quacc_context_params(_func)
+        _jf_func = _get_jobflow_wrapped_func(_func_for_jf, **kwargs)
+        # Use the closure-based wrapper (not picklable, but jobflow doesn't
+        # pickle the top-level callable).
+        return _make_context_capturing_wrapper(_func, _jf_func)
     elif settings.WORKFLOW_ENGINE == "parsl":
         from parsl import python_app
 
@@ -313,6 +325,7 @@ def flow(_func: Callable[..., Any] | None = None, **kwargs) -> Flow:
     elif settings.WORKFLOW_ENGINE == "prefect":
         return _get_prefect_wrapped_flow(_func, settings, **kwargs)
     elif settings.WORKFLOW_ENGINE == "jobflow":
+        _func = tracked(NodeType.FLOW)(_func)
         return _get_jobflow_wrapped_flow(_func)
     else:
         return tracked(NodeType.FLOW)(_func)
@@ -511,7 +524,10 @@ def subflow(_func: Callable[..., Any] | None = None, **kwargs) -> Subflow:
 
         return task(_func, namespace=_func.__module__, **kwargs)
     elif settings.WORKFLOW_ENGINE == "jobflow":
-        return _get_jobflow_wrapped_func(_func, **kwargs)
+        _func = tracked(NodeType.SUBFLOW)(_func)
+        _func_for_jf = _add_quacc_context_params(_func)
+        _jf_func = _get_jobflow_wrapped_func(_func_for_jf, **kwargs)
+        return _make_context_capturing_wrapper(_func, _jf_func)
     else:
         _func = tracked(NodeType.SUBFLOW)(_func)
         return _func
@@ -617,3 +633,63 @@ class Delayed_:
 
     def __call__(self, *args, **kwargs):
         return self.func(*args, **kwargs)
+
+
+def _make_context_capturing_wrapper(
+    original_func: Callable, wrapped_callable: Callable
+) -> Callable:
+    """
+    Create a wrapper that captures quacc context at call time and injects it
+    for restoration at execution time.
+
+    Parameters
+    ----------
+    original_func
+        The original function being decorated (used for @wraps).
+    wrapped_callable
+        The workflow-engine-wrapped callable to invoke.
+
+    Returns
+    -------
+    Callable
+        A wrapper that captures context before calling the wrapped callable.
+    """
+
+    @wraps(original_func)
+    def context_capturing_wrapper(*args, **kw):
+        ctx = get_context()
+        if ctx != ():
+            kw["_quacc_ctx"] = ctx
+        dir_ctx = get_directory_context()
+        if dir_ctx != "":
+            kw["_quacc_dir"] = dir_ctx
+        return wrapped_callable(*args, **kw)
+
+    return context_capturing_wrapper
+
+
+def _add_quacc_context_params(func: Callable) -> Callable:
+    """Wrap *func* so ``_quacc_ctx`` and ``_quacc_dir`` appear as explicit
+    keyword parameters in its signature.
+
+    Jobflow and Redun both inspect function signatures to determine which
+    arguments to resolve/pass.  By making the context params explicit
+    (with defaults), the engines will accept them without error and
+    forward them to the worker.
+    """
+
+    def wrapper(*args, _quacc_ctx=(), _quacc_dir="", **kwargs):
+        # Re-inject context params into **kwargs so the tracked wrapper
+        # (inside func) can pop them and restore the ContextVars.
+        if _quacc_ctx != ():
+            kwargs["_quacc_ctx"] = _quacc_ctx
+        if _quacc_dir != "":
+            kwargs["_quacc_dir"] = _quacc_dir
+        return func(*args, **kwargs)
+
+    # Copy function metadata so the engine sees the correct name/module.
+    wrapper.__name__ = func.__name__
+    wrapper.__module__ = func.__module__
+    wrapper.__qualname__ = func.__qualname__
+    wrapper.__doc__ = func.__doc__
+    return wrapper
